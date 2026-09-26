@@ -62,7 +62,17 @@
       header{padding-top:22px}.hero-photo{width:210px}.upload-card{padding:17px;border-radius:22px}.gallery{columns:2 140px}
       .photo-info{opacity:1}.gallery-head{align-items:center}header:before,header:after{font-size:38px}
     }
-  </style>
+  
+    .code-modal{width:min(430px,92vw);background:#fffaf6;color:var(--text);padding:0;border:1px solid var(--line)}
+    .code-box{padding:26px;text-align:center}.code-box .bow{font-size:34px;margin-bottom:4px}
+    .code-box h3{margin:0 0 8px;color:#8a5d45;font-size:24px}.code-box p{margin:0 0 18px;color:var(--muted);line-height:1.5}
+    .code-box input{width:100%;text-transform:uppercase;text-align:center;letter-spacing:.12em;border:1px solid var(--line);border-radius:14px;padding:14px;font-size:17px;outline:none;background:white;color:var(--text)}
+    .code-box input:focus{border-color:#dfa0aa;box-shadow:0 0 0 3px #f9dadd66}
+    .code-actions{display:flex;gap:10px;margin-top:12px}.code-actions button{flex:1}
+    #confirmCode{background:linear-gradient(135deg,#df8f9d,#c97889);color:white}#cancelCode{background:#f4e8df;color:#805c4a}
+    #codeError{min-height:20px;margin-top:10px;color:#b94e62;font-size:14px}
+
+</style>
 </head>
 <body>
   <header>
@@ -94,6 +104,17 @@
     </div>
     <section id="gallery" class="gallery"></section>
   </main>
+
+
+  <dialog id="codeDialog" class="code-modal">
+    <div class="code-box">
+      <div class="bow">🎀</div><h3>Código da festa</h3>
+      <p>Para enviar suas fotos, digite o código de acesso da Festa da Maria Alice.</p>
+      <input id="partyCode" type="text" autocomplete="off" autocapitalize="characters" placeholder="Código de acesso">
+      <div class="code-actions"><button id="cancelCode" type="button">Cancelar</button><button id="confirmCode" type="button">Confirmar</button></div>
+      <div id="codeError"></div>
+    </div>
+  </dialog>
 
   <dialog id="viewer">
     <img id="viewerImage" alt="Foto ampliada" />
@@ -133,6 +154,26 @@
     const viewerImage = document.querySelector('#viewerImage');
     const viewerAuthor = document.querySelector('#viewerAuthor');
     const downloadLink = document.querySelector('#downloadLink');
+    const codeDialog = document.querySelector('#codeDialog');
+    const partyCode = document.querySelector('#partyCode');
+    const confirmCode = document.querySelector('#confirmCode');
+    const cancelCode = document.querySelector('#cancelCode');
+    const codeError = document.querySelector('#codeError');
+    const MAX_FILES = 20;
+    const ACCESS_TOKEN_KEY = 'maria_alice_album_token';
+    const ACCESS_EXPIRES_KEY = 'maria_alice_album_expires';
+    const FUNCTIONS_BASE = `${SUPABASE_URL}/functions/v1`;
+    let pendingUpload = false;
+
+    function clearAccess(){ localStorage.removeItem(ACCESS_TOKEN_KEY); localStorage.removeItem(ACCESS_EXPIRES_KEY); }
+    function getValidAccessToken(){
+      const token=localStorage.getItem(ACCESS_TOKEN_KEY);
+      const expiresAt=Number(localStorage.getItem(ACCESS_EXPIRES_KEY)||0);
+      if(!token || !expiresAt || Date.now()>=expiresAt){ clearAccess(); return null; }
+      return token;
+    }
+    function showCodeDialog(){ codeError.textContent=''; partyCode.value=''; codeDialog.showModal(); setTimeout(()=>partyCode.focus(),50); }
+
 
     let selectedFiles = [];
 
@@ -154,62 +195,56 @@
     }
 
     fileInput.addEventListener('change', () => {
-      selectedFiles = [...fileInput.files];
+      const files=[...fileInput.files]; selectedFiles=files.slice(0,MAX_FILES);
+      status.textContent=files.length>MAX_FILES ? `Você pode enviar no máximo ${MAX_FILES} fotos por vez. As primeiras ${MAX_FILES} foram selecionadas.` : '';
       renderPreview();
     });
 
     ['dragenter','dragover'].forEach(evt => dropArea.addEventListener(evt, e => { e.preventDefault(); dropArea.classList.add('drag'); }));
     ['dragleave','drop'].forEach(evt => dropArea.addEventListener(evt, e => { e.preventDefault(); dropArea.classList.remove('drag'); }));
     dropArea.addEventListener('drop', e => {
-      selectedFiles = [...e.dataTransfer.files].filter(f => f.type.startsWith('image/') || /\.(heic|heif)$/i.test(f.name));
+      const files=[...e.dataTransfer.files].filter(f=>f.type.startsWith('image/') || /\.(heic|heif)$/i.test(f.name));
+      selectedFiles=files.slice(0,MAX_FILES);
+      status.textContent=files.length>MAX_FILES ? `Você pode enviar no máximo ${MAX_FILES} fotos por vez. As primeiras ${MAX_FILES} foram selecionadas.` : '';
       renderPreview();
     });
 
-    uploadBtn.addEventListener('click', async () => {
-      if (!selectedFiles.length) return;
-      uploadBtn.disabled = true;
-      const author = guestName.value.trim() || 'Convidado';
-      let sent = 0;
+    async function validatePartyCode(){
+      const code=partyCode.value.trim();
+      if(!code){codeError.textContent='Digite o código da festa.';return false;}
+      confirmCode.disabled=true;confirmCode.textContent='Validando...';codeError.textContent='';
+      try{
+        const response=await fetch(`${FUNCTIONS_BASE}/album-access`,{method:'POST',headers:{'Content-Type':'application/json','apikey':SUPABASE_ANON_KEY},body:JSON.stringify({code})});
+        const result=await response.json().catch(()=>({}));
+        if(!response.ok || !result.ok || !result.token || !result.expiresAt){codeError.textContent=result.message||'Código incorreto.';return false;}
+        localStorage.setItem(ACCESS_TOKEN_KEY,result.token);localStorage.setItem(ACCESS_EXPIRES_KEY,String(result.expiresAt));codeDialog.close();return true;
+      }catch(error){console.error(error);codeError.textContent='Não foi possível validar o código. Tente novamente.';return false;}
+      finally{confirmCode.disabled=false;confirmCode.textContent='Confirmar';}
+    }
 
-      for (const file of selectedFiles) {
-        status.textContent = `Enviando ${sent + 1} de ${selectedFiles.length}...`;
-        const path = `evento/${Date.now()}-${safeName(file.name)}`;
-        const { error: uploadError } = await supabase.storage.from(BUCKET).upload(path, file, {
-          cacheControl: '3600', upsert: false, contentType: file.type || undefined
-        });
+    async function sendSelectedPhotos(){
+      if(!selectedFiles.length)return;
+      const token=getValidAccessToken();
+      if(!token){pendingUpload=true;showCodeDialog();return;}
+      uploadBtn.disabled=true;uploadBtn.textContent='Enviando...';
+      status.textContent=`Enviando ${selectedFiles.length} foto${selectedFiles.length>1?'s':''}...`;
+      const form=new FormData();form.append('token',token);form.append('guest_name',guestName.value.trim()||'Convidado');
+      selectedFiles.forEach(file=>form.append('photos',file,file.name));
+      try{
+        const response=await fetch(`${FUNCTIONS_BASE}/album-upload`,{method:'POST',headers:{'apikey':SUPABASE_ANON_KEY},body:form});
+        const result=await response.json().catch(()=>({}));
+        if(response.status===401 || result.code==='AUTH_EXPIRED'){clearAccess();status.textContent='Sua autorização expirou. Digite o código novamente.';pendingUpload=true;showCodeDialog();return;}
+        if(!response.ok || !result.ok)throw new Error(result.message||'Não foi possível enviar as fotos.');
+        const sent=Number(result.uploaded||0);status.textContent=`✨ ${sent} foto${sent===1?' enviada':'s enviadas'} com sucesso!`;
+        selectedFiles=[];fileInput.value='';preview.innerHTML='';uploadBtn.textContent='Enviar fotos';await loadPhotos();
+      }catch(error){console.error(error);status.textContent=error.message||'Não foi possível enviar as fotos.';}
+      finally{uploadBtn.disabled=selectedFiles.length===0;if(selectedFiles.length)uploadBtn.textContent=`Enviar ${selectedFiles.length} foto${selectedFiles.length>1?'s':''}`;}
+    }
 
-        if (uploadError) {
-          console.error(uploadError);
-          status.textContent = `Não foi possível enviar ${file.name}. Verifique a configuração do Supabase.`;
-          uploadBtn.disabled = false;
-          return;
-        }
-
-        const { data: publicData } = supabase.storage.from(BUCKET).getPublicUrl(path);
-        const { error: dbError } = await supabase.from('photos').insert({
-          file_name: file.name,
-          file_path: path,
-          public_url: publicData.publicUrl,
-          guest_name: author
-        });
-
-        if (dbError) {
-          console.error(dbError);
-          status.textContent = 'A foto foi enviada, mas houve erro ao registrar na galeria.';
-          uploadBtn.disabled = false;
-          return;
-        }
-        sent++;
-      }
-
-      status.textContent = `✨ ${sent} foto${sent > 1 ? 's enviadas' : ' enviada'} com sucesso!`;
-      selectedFiles = [];
-      fileInput.value = '';
-      preview.innerHTML = '';
-      uploadBtn.textContent = 'Enviar fotos';
-      uploadBtn.disabled = true;
-      await loadPhotos();
-    });
+    uploadBtn.addEventListener('click',sendSelectedPhotos);
+    confirmCode.addEventListener('click',async()=>{const valid=await validatePartyCode();if(valid&&pendingUpload){pendingUpload=false;await sendSelectedPhotos();}});
+    partyCode.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();confirmCode.click();}});
+    cancelCode.addEventListener('click',()=>{pendingUpload=false;codeDialog.close();});
 
     async function loadPhotos() {
       const { data, error } = await supabase.from('photos').select('*').order('created_at', { ascending:false });
